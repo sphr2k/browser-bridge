@@ -74,12 +74,15 @@ Some programs ignore BROWSER and invoke xdg-open. To cover those, create a simpl
 
 ~~~sh
 mkdir -p ~/.local/bin
-# Check first: do not overwrite an existing ~/.local/bin/xdg-open.
-cat > ~/.local/bin/xdg-open <<'SH'
+if [ -e ~/.local/bin/xdg-open ] || [ -L ~/.local/bin/xdg-open ]; then
+  echo "xdg-open already exists; inspect it before replacing" >&2
+else
+  cat > ~/.local/bin/xdg-open <<'SH'
 #!/bin/sh
 exec mise exec -- browser-bridge "$@"
 SH
-chmod +x ~/.local/bin/xdg-open
+  chmod +x ~/.local/bin/xdg-open
+fi
 export PATH="$HOME/.local/bin:$PATH"
 xdg-open https://github.com/login/device
 ~~~
