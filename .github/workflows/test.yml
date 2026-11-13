@@ -31,3 +31,20 @@ jobs:
       - run: mise exec -- browser-bridge --help
       - if: runner.os == 'macOS'
         run: mise bootstrap macos launchd-agents apply --dry-run
+      - if: runner.os == 'Linux'
+        name: Opt-in Lima bootstrap
+        run: |
+          tmp="$(mktemp -d)"
+          mkdir -p "$tmp/home" "$tmp/config" "$tmp/data" "$tmp/state"
+          export HOME="$tmp/home"
+          export MISE_CONFIG_DIR="$tmp/config"
+          export MISE_GLOBAL_CONFIG_FILE="$tmp/config/config.toml"
+          export MISE_DATA_DIR="$tmp/data"
+          export MISE_STATE_DIR="$tmp/state"
+          mise -E lima bootstrap --only dotfiles,tools,task --yes
+          test -x "$HOME/.local/bin/xdg-open"
+          grep -q 'BROWSER = "browser-bridge"' "$MISE_GLOBAL_CONFIG_FILE"
+          grep -q 'http:browser-bridge' "$MISE_GLOBAL_CONFIG_FILE"
+          printf 'existing wrapper\n' > "$HOME/.local/bin/xdg-open"
+          mise -E lima dotfiles apply --yes
+          grep -q '^existing wrapper$' "$HOME/.local/bin/xdg-open"

@@ -1,0 +1,24 @@
+# Optional Linux guest module for: mise bootstrap --from <repo-url> -E lima --only tools,dotfiles,task --yes
+#
+# This is deliberately separate from mise.toml: the macOS host must not gain an
+# xdg-open wrapper, and Linux users must opt in.
+[env]
+BROWSER = "browser-bridge"
+
+[dotfiles."~/.local/bin/xdg-open"]
+content = """#!/bin/sh
+exec mise exec -- browser-bridge "$@"
+"""
+permissions = "0755"
+create_if_missing = true
+
+[tasks.bootstrap]
+description = "Expose browser-bridge as the global default BROWSER on the Linux guest"
+run = """
+mise use -g \
+  --tool-option url=https://raw.githubusercontent.com/sphr2k/browser-bridge/v0.2.0/bin/browser-bridge \
+  --tool-option bin=browser-bridge \
+  --tool-option checksum=sha256:1d104ae3cde66b697316fe97652f84337671ee285b3290985d7b4d2539030fb5 \
+  http:browser-bridge@0.2.0
+mise set -g BROWSER=browser-bridge
+"""

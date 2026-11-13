@@ -59,7 +59,38 @@ portForwards:
 
 Restart the VM after changing its config. reverse: true forwards a guest Unix socket into the macOS host socket; there is no TCP listener and no additional proxy required.
 
-## Lima Linux guest: configure the client via mise
+## Lima Linux guest: optional one-command mise bootstrap
+
+After configuring the Lima socket forwarding above, **run inside the Linux guest**:
+
+~~~sh
+mise bootstrap \
+  --from https://github.com/sphr2k/browser-bridge.git \
+  -E lima --only tools,dotfiles,task --yes
+~~~
+
+This reads the optional [mise.lima.toml](mise.lima.toml) module and performs all Linux client setup with mise:
+
+- Installs and pins browser-bridge globally via mise use -g, including its SHA-256 checksum.
+- Sets the global mise environment variable BROWSER=browser-bridge.
+- Deploys an executable ~/.local/bin/xdg-open wrapper through mise dotfiles that calls mise exec -- browser-bridge.
+- Preserves an existing ~/.local/bin/xdg-open instead of replacing it (create_if_missing = true).
+
+It intentionally **does not start a Linux service**. Lima supplies the guest socket, and the macOS launchd service handles each request.
+
+Check that ~/.local/bin occurs before /usr/bin on PATH:
+
+~~~sh
+mise exec -- browser-bridge --version
+command -v xdg-open
+xdg-open https://github.com/login/device
+~~~
+
+The desired xdg-open path is ~/.local/bin/xdg-open. If it is not on PATH, add ~/.local/bin to your shell startup config. BROWSER is exported by an activated mise shell (or when launching programs via mise exec); otherwise export BROWSER=browser-bridge yourself.
+
+**Alternatively, install without the optional bootstrap:** use the mise use -g command from the first section and follow the manual setup below.
+
+## Lima Linux guest: manual setup (alternative)
 
 After running the same mise use -g installation command from the first section **inside the guest**, set the browser environment for shells managed by mise:
 
