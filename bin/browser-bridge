@@ -1,0 +1,218 @@
+#!/usr/bin/env python3
+"""Open browser URLs and Finder paths on the macOS host from a Lima Linux guest."""
+
+from __future__ import annotations
+
+import argparse
+import errno
+import json
+import os
+import re
+from pathlib import Path
+import signal
+import socket
+import stat
+import subprocess
+import sys
+from urllib.parse import unquote, urlsplit
+
+VERSION = "0.1.0"
+MAX_MESSAGE_BYTES = 16384
+DEFAULT_HOST_SOCKET = Path.home() / ".lima" / "browser-bridge.sock"
+DEFAULT_GUEST_SOCKET = Path.home() / ".lima-browser-bridge.sock"
+ACTIONS = {"open", "reveal"}
+
+
+def path_from_target(value: str) -> str | None:
+    """Return an absolute host-visible path or None for unsupported targets."""
+    if value.startswith("file:"):
+        try:
+            parsed = urlsplit(value)
+            if parsed.scheme != "file" or parsed.netloc not in ("", "localhost"):
+                return None
+            value = unquote(parsed.path, errors="strict")
+        except (UnicodeError, ValueError):
+            return None
+    if not value.startswith("/") or "\x00" in value or "\n" in value or "\r" in value:
+        return None
+    return value
+
+
+def valid_target(action: str, target: str) -> bool:
+    if action not in ACTIONS or not isinstance(target, str):
+        return False
+    try:
+        if not target or len(target.encode("utf-8")) > 8192:
+            return False
+        if any(ord(char) < 32 or ord(char) == 127 for char in target):
+            return False
+        parsed = urlsplit(target)
+        if parsed.scheme in {"http", "https"}:
+            if action != "open" or not parsed.hostname or any(char.isspace() for char in target):
+                return False
+            _ = parsed.port
+            return True
+        return path_from_target(target) is not None
+    except (UnicodeError, ValueError):
+        return False
+
+
+def normalize_target(target: str) -> str:
+    if target.startswith(("http://", "https://", "file:")) or re.match(r"^[A-Za-z][A-Za-z0-9+.-]*:", target):
+        return target
+    return os.path.abspath(os.path.expanduser(target))
+
+
+def send_request(action: str, target: str, socket_path: Path = DEFAULT_GUEST_SOCKET) -> int:
+    target = normalize_target(target)
+    if not valid_target(action, target):
+        print("browser-bridge: expected an HTTP(S) URL or absolute file path", file=sys.stderr)
+        return 2
+
+    request = (json.dumps({"action": action, "target": target}, ensure_ascii=False) + "\n").encode()
+    try:
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as conn:
+            conn.settimeout(8)
+            conn.connect(str(socket_path))
+            conn.sendall(request)
+            with conn.makefile("rb") as stream:
+                reply = stream.readline(256)
+        if reply == b"OK\n":
+            return 0
+        print("browser-bridge: " + (reply.decode("utf-8", "replace").strip() or "empty response"),
+              file=sys.stderr)
+        return 1
+    except OSError as exc:
+        print(f"browser-bridge: cannot reach host socket {socket_path}: {exc}", file=sys.stderr)
+        return 1
+
+
+def handle_connection(conn: socket.socket) -> None:
+    with conn:
+        conn.settimeout(6)
+        try:
+            with conn.makefile("rb") as stream:
+                raw = stream.readline(MAX_MESSAGE_BYTES + 2)
+            if not raw.endswith(b"\n") or len(raw) > MAX_MESSAGE_BYTES + 1:
+                conn.sendall(b"ERR invalid message length\n")
+                return
+            message = json.loads(raw)
+            if not isinstance(message, dict):
+                conn.sendall(b"ERR invalid request\n")
+                return
+            action, target = message.get("action"), message.get("target")
+            if not isinstance(action, str) or not isinstance(target, str) or not valid_target(action, target):
+                conn.sendall(b"ERR invalid action or target\n")
+                return
+
+            if target.startswith(("http://", "https://")):
+                argv = ["/usr/bin/open", target]
+            else:
+                path = path_from_target(target)
+                if path is None:
+                    conn.sendall(b"ERR invalid path\n")
+                    return
+                # Opening a directory uses Finder. Revealing selects the file in Finder.
+                argv = ["/usr/bin/open", "-R", path] if action == "reveal" else ["/usr/bin/open", path]
+            subprocess.run(argv, check=True, timeout=10, stdout=subprocess.DEVNULL,
+                           stderr=subprocess.DEVNULL)
+            conn.sendall(b"OK\n")
+        except (OSError, UnicodeError, ValueError, json.JSONDecodeError, subprocess.SubprocessError) as exc:
+            print(f"browser-bridge: host open failed: {exc}", file=sys.stderr, flush=True)
+            try:
+                conn.sendall(b"ERR failed to open target\n")
+            except OSError:
+                pass
+
+
+def serve(socket_path: Path = DEFAULT_HOST_SOCKET) -> None:
+    socket_path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    if socket_path.exists() or socket_path.is_symlink():
+        metadata = socket_path.lstat()
+        if not stat.S_ISSOCK(metadata.st_mode) or metadata.st_uid != os.getuid():
+            raise RuntimeError(f"refusing to replace socket not owned by this user: {socket_path}")
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as probe:
+            probe.settimeout(1)
+            try:
+                probe.connect(str(socket_path))
+            except OSError as exc:
+                if exc.errno != errno.ECONNREFUSED:
+                    raise
+                socket_path.unlink()
+            else:
+                raise RuntimeError(f"already listening on {socket_path}")
+
+    old_umask = os.umask(0o077)
+    try:
+        listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        try:
+            listener.bind(str(socket_path))
+        except BaseException:
+            listener.close()
+            raise
+    finally:
+        os.umask(old_umask)
+
+    inode = socket_path.stat().st_ino
+    socket_path.chmod(0o600)
+    listener.listen(16)
+    print(f"browser-bridge: listening on {socket_path}", flush=True)
+
+    def term_handler(_signum: int, _frame: object) -> None:
+        raise KeyboardInterrupt
+
+    previous_handler = signal.signal(signal.SIGTERM, term_handler)
+    try:
+        with listener:
+            while True:
+                conn, _ = listener.accept()
+                handle_connection(conn)
+    except KeyboardInterrupt:
+        pass
+    finally:
+        signal.signal(signal.SIGTERM, previous_handler)
+        try:
+            if socket_path.lstat().st_ino == inode:
+                socket_path.unlink()
+        except FileNotFoundError:
+            pass
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = sys.argv[1:] if argv is None else argv
+    parser = argparse.ArgumentParser(prog="browser-bridge",
+        description="Open browser URLs and Finder paths on a macOS host through a Lima Unix socket.")
+    parser.add_argument("--version", action="version", version=f"%(prog)s {VERSION}")
+    subcommands = parser.add_subparsers(dest="command")
+    open_parser = subcommands.add_parser("open", help="Open URL or host-visible file/directory")
+    open_parser.add_argument("target")
+    open_parser.add_argument("--socket", type=Path, default=DEFAULT_GUEST_SOCKET)
+    reveal_parser = subcommands.add_parser("reveal", help="Reveal host-visible file in macOS Finder")
+    reveal_parser.add_argument("target")
+    reveal_parser.add_argument("--socket", type=Path, default=DEFAULT_GUEST_SOCKET)
+    serve_parser = subcommands.add_parser("serve", help="Run macOS-only socket listener")
+    serve_parser.add_argument("--socket", type=Path, default=DEFAULT_HOST_SOCKET)
+
+    # Same executable can be symlinked as xdg-open or used via BROWSER.
+    if len(args) == 1 and not args[0].startswith("-") and args[0] not in ("open", "reveal", "serve"):
+        return send_request("open", args[0])
+    if len(args) == 2 and args[0] == "--":
+        return send_request("open", args[1])
+    options = parser.parse_args(args)
+    if options.command in ("open", "reveal"):
+        return send_request(options.command, options.target, options.socket)
+    if options.command == "serve":
+        if sys.platform != "darwin":
+            parser.error("'serve' is only supported on macOS")
+        try:
+            serve(options.socket)
+        except (OSError, RuntimeError) as exc:
+            print(f"browser-bridge: {exc}", file=sys.stderr)
+            return 1
+        return 0
+    parser.print_help(sys.stderr)
+    return 2
+
+
+if __name__ == "__main__":
+    sys.exit(main())
