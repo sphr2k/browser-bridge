@@ -1,38 +1,53 @@
 # browser-bridge
 
-Open URLs in the **macOS default browser**, and host files/directories in **Finder or their default macOS app**, from a **Lima Linux guest**.
+Open URLs in the macOS default browser and open or reveal host files in Finder from a Lima Linux guest, using a forwarded Unix socket.
 
-A single Python standard-library script. No TCP listener, browser extension, extra CLI daemon on Linux, or third-party Python packages.
+Pure Python standard library. No TCP ports, additional Python packages, or guest-side service.
 
-## Install on macOS and Linux
+## Installation: mise only
 
-Homebrew tap (explicit URL because the repository is named browser-bridge, without the homebrew- prefix):
+Requires mise 2026.11+ and Python 3.10+.
 
-~~~sh
-brew tap sphr2k/browser-bridge https://github.com/sphr2k/browser-bridge
-brew install sphr2k/browser-bridge/browser-bridge
+Merge the following TOML into your global ~/.config/mise/config.toml on **both** the macOS host and Linux guest. The macOS-only bootstrap section is ignored on Linux. The same configuration is provided in [mise.toml](mise.toml).
+
+~~~toml
+[tools."http:browser-bridge"]
+version = "0.2.0"
+url = "https://raw.githubusercontent.com/sphr2k/browser-bridge/v{{ version }}/bin/browser-bridge"
+bin = "browser-bridge"
+checksum = "sha256:1d104ae3cde66b697316fe97652f84337671ee285b3290985d7b4d2539030fb5"
+
+[bootstrap.macos.launchd.agents.browser-bridge]
+program = "~/.local/bin/mise"
+args = ["exec", "--", "browser-bridge", "serve"]
+run_at_load = true
+keep_alive = true
 ~~~
 
-### macOS host: launchd
+The launch agent's program path is for the official [mise.run installer](https://mise.jdx.dev/installing-mise.html), which installs mise at ~/.local/bin/mise. If you installed mise elsewhere, replace that with the absolute, stable path to your mise executable. Do not use a dynamic shell shim. Do not overwrite your global config; merge the sections into it.
 
-Start as a user service (do **not** use sudo):
-
-~~~sh
-brew services start sphr2k/browser-bridge/browser-bridge
-brew services list
-~~~
-
-The service listens at ~/.lima/browser-bridge.sock (mode 0600). Homebrew installs and manages a launchd agent that starts at login and restarts after failures.
-
-Stop with:
+On **both** macOS and Linux, install the tool:
 
 ~~~sh
-brew services stop sphr2k/browser-bridge/browser-bridge
+mise install
+mise exec -- browser-bridge --version
 ~~~
 
-### Lima: forward Unix socket
+On the **macOS host** register the launchd agent (as your normal user; no sudo):
 
-Merge this into your Lima VM configuration (limactl edit <vm-name>):
+~~~sh
+mise bootstrap macos launchd-agents apply --dry-run
+mise bootstrap macos launchd-agents apply --yes
+mise bootstrap macos launchd-agents status
+~~~
+
+Mise creates ~/Library/LaunchAgents/dev.mise.browser-bridge.plist, starts the service at login and automatically restarts it on exit. Remove with mise bootstrap services remove browser-bridge.
+
+Install with mise install *before* applying the LaunchAgent. The full mise bootstrap normally processes macOS LaunchAgents before installing tools, so these two explicit steps ensure the executable is present.
+
+### Lima VM
+
+Merge into the existing portForwards list in your Lima VM configuration (limactl edit <vm-name>):
 
 ~~~yaml
 portForwards:
@@ -41,63 +56,53 @@ portForwards:
     reverse: true
 ~~~
 
-Restart the VM after changing portForwards. These are separate host and guest socket paths. With reverse: true, Lima forwards requests from the guest into the macOS listener. If a portForwards array exists, add only this entry rather than overwriting other rules.
+Restart the VM to apply. The macOS listener is ~/.lima/browser-bridge.sock (0600); the Linux client uses ~/.lima-browser-bridge.sock. reverse: true forwards from Linux into the macOS socket.
 
-### Linux guest: client
+### Linux: BROWSER and xdg-open
 
-Install the same formula, then:
+After installing with mise inside the guest:
 
 ~~~sh
+export BROWSER="$(mise which browser-bridge)"
 browser-bridge open https://github.com/login/device
-browser-bridge https://example.org
 ~~~
 
-For CLI tools that use BROWSER or xdg-open, optionally configure:
+To support xdg-open:
 
 ~~~sh
 mkdir -p ~/.local/bin
-ln -s "$(command -v browser-bridge)" ~/.local/bin/xdg-open
+ln -s "$(mise which browser-bridge)" ~/.local/bin/xdg-open
 export PATH="$HOME/.local/bin:$PATH"
-export BROWSER="$(command -v browser-bridge)"
 xdg-open https://github.com
 ~~~
 
-Put the exports in your shell startup configuration to make them persistent. Do not overwrite an existing ~/.local/bin/xdg-open without checking it. For tools that respect BROWSER, only the BROWSER export is needed.
+Only create the symlink if there is no existing ~/.local/bin/xdg-open. If you upgrade the mise tool to a new version, update the version-specific symlink or use a wrapper.
 
-## Open Finder directories and reveal files
+## Browser and Finder
 
 ~~~sh
+browser-bridge open https://github.com
 browser-bridge open /Users/you/projects
 browser-bridge reveal /Users/you/projects/notes.txt
 browser-bridge open file:///Users/you/projects
 xdg-open /Users/you/projects
 ~~~
 
-Paths refer to the **macOS host filesystem**, not necessarily the Linux guest filesystem. A Linux-only path such as /home/user/project cannot be opened in Finder. Supply a host path or use a Lima-mounted host directory whose paths agree. The open command uses the OS default application (Finder for directories); reveal selects a file in Finder without opening it.
+File paths are interpreted on the **macOS host**, not on Linux. A Linux-only path (for example /home/user/repo) is not automatically visible to Finder. Use a host-visible path or an equivalent Lima mount. open launches files in their default macOS app (folders in Finder); reveal selects files in Finder.
 
-## CLI reference
+## CLI
 
 ~~~text
 browser-bridge open URL_OR_HOST_PATH [--socket GUEST_SOCKET]
 browser-bridge reveal HOST_PATH [--socket GUEST_SOCKET]
-browser-bridge serve [--socket HOST_SOCKET]     # macOS only
-browser-bridge URL_OR_HOST_PATH                 # compatible with BROWSER and xdg-open
+browser-bridge serve [--socket HOST_SOCKET]  # macOS only
+browser-bridge URL_OR_HOST_PATH             # BROWSER / xdg-open compatible
 browser-bridge --version
 ~~~
 
-Default socket locations:
-
-| Machine | Socket |
-|---------|--------|
-| macOS host | ~/.lima/browser-bridge.sock |
-| Lima guest | ~/.lima-browser-bridge.sock |
-
 ## Security
 
-- Only HTTP(S) URLs and absolute paths are accepted. The host accepts the JSON-line actions open and reveal, and never executes a shell command.
-- The host listener is a 0600 Unix socket; no network TCP port is opened.
-- Use the service without sudo on trusted Lima guests only. A connected guest can ask the host to open a local document or application, including files with potentially unsafe associations.
-- The tool does not transfer files or grant access to files that are not already visible on the macOS host.
+No network listener. The service runs as the macOS user with a private 0600 Unix socket, accepts only open and reveal with HTTP(S) URLs or absolute host paths, and invokes /usr/bin/open without a shell. Any trusted guest that can use the forwarded socket can request that macOS open local documents or applications; use only with trusted guests. No file transfers or arbitrary shell execution.
 
 ## Development
 
@@ -105,4 +110,4 @@ Default socket locations:
 python3 -m unittest discover -s tests -v
 ~~~
 
-Python 3.10+; Homebrew uses python@3.14 on both macOS and Linux. MIT license.
+MIT license. Mise-only from v0.2.0 onward; the previous v0.1.0 Homebrew distribution is not maintained.

@@ -1,0 +1,14 @@
+# Merge these sections into ~/.config/mise/config.toml on macOS.
+[tools."http:browser-bridge"]
+version = "0.2.0"
+url = "https://raw.githubusercontent.com/sphr2k/browser-bridge/v{{ version }}/bin/browser-bridge"
+bin = "browser-bridge"
+checksum = "sha256:1d104ae3cde66b697316fe97652f84337671ee285b3290985d7b4d2539030fb5"
+
+[bootstrap.macos.launchd.agents.browser-bridge]
+# Default executable path from the official mise.run installer.
+# If installed elsewhere, change to the absolute path of the mise binary.
+program = "~/.local/bin/mise"
+args = ["exec", "--", "browser-bridge", "serve"]
+run_at_load = true
+keep_alive = true

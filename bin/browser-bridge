@@ -16,7 +16,7 @@ import subprocess
 import sys
 from urllib.parse import unquote, urlsplit
 
-VERSION = "0.1.0"
+VERSION = "0.2.0"
 MAX_MESSAGE_BYTES = 16384
 DEFAULT_HOST_SOCKET = Path.home() / ".lima" / "browser-bridge.sock"
 DEFAULT_GUEST_SOCKET = Path.home() / ".lima-browser-bridge.sock"
